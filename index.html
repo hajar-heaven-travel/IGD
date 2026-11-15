@@ -1,0 +1,204 @@
+
+import React, { useEffect, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
+import "./App.css";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
+
+const TARGET = 50;
+
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [team, setTeam] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function loadData() {
+    const [{ data: people }, { data: bookings }] =
+      await Promise.all([
+        supabase.from("salespeople").select("*"),
+        supabase.from("bookings").select("id,salesperson_id")
+      ]);
+
+    const updated = (people || []).map(person => ({
+      ...person,
+      count: (bookings || []).filter(
+        b => b.salesperson_id === person.id
+      ).length
+    }));
+
+    setTeam(updated.sort((a, b) => b.count - a.count));
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+    });
+
+    const { data: listener } =
+      supabase.auth.onAuthStateChange((_event, session) => {
+        setSession(session);
+      });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setTeam([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    loadData();
+
+    const channel = supabase
+      .channel("live-sales-challenge")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "bookings"
+        },
+        () => loadData()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [session]);
+
+  async function login(e) {
+    e.preventDefault();
+    const email = e.target.email.value;
+    const password = e.target.password.value;
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    setMessage(error ? error.message : "");
+  }
+
+  async function addBooking() {
+    if (!session || busy) return;
+
+    setBusy(true);
+    const { error } = await supabase
+      .from("bookings")
+      .insert({ salesperson_id: session.user.id });
+
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setMessage("🎉 حجز جديد! برافو عليك");
+      await loadData();
+    }
+
+    setBusy(false);
+  }
+
+  if (!session) {
+    return (
+      <main className="login">
+        <h1>🏆 Sales Challenge</h1>
+        <p>Heaven Travel</p>
+        <form onSubmit={login}>
+          <input name="email" type="email"
+            placeholder="Email" required />
+          <input name="password" type="password"
+            placeholder="Password" required />
+          <button>تسجيل الدخول</button>
+        </form>
+        {message && <p>{message}</p>}
+      </main>
+    );
+  }
+
+  const current = team.find(p => p.id === session.user.id);
+  const myCount = current?.count || 0;
+  const percent = Math.min(myCount / TARGET * 100, 100);
+
+  return (
+    <main className="app">
+      <header>
+        <div>
+          <h1>🏆 SALES CHALLENGE</h1>
+          <p>HEAVEN TRAVEL • LIVE COMPETITION</p>
+        </div>
+        <button className="logout"
+          onClick={() => supabase.auth.signOut()}>
+          خروج
+        </button>
+      </header>
+
+      <section className="hero">
+        <h2>كل حجز بيقربك من الفوز!</h2>
+        <p>هدفك 50 حجز • خلي المنافسة تبدأ 🔥</p>
+      </section>
+
+      {current && (
+        <section className="my-card">
+          <h2>أهلًا {current.name} 👋</h2>
+          <div className="big-number">
+            {myCount} <span>/ 50</span>
+          </div>
+          <div className="progress">
+            <div style={{ width: percent + "%" }} />
+          </div>
+          <p>متبقي {Math.max(0, TARGET - myCount)} حجز للوصول للهدف</p>
+
+          <button className="add" onClick={addBooking}
+            disabled={busy || myCount >= TARGET}>
+            {busy ? "جاري التسجيل..." : "+ تسجيل حجز جديد"}
+          </button>
+          <p className="encourage">
+            {myCount >= 50 ? "🏆 CHAMPION! أنت حققت الهدف!" :
+             myCount >= 40 ? "🔥 فاضلك خطوات وتوصل!" :
+             myCount >= 30 ? "🚀 أنت قريب جدًا!" :
+             myCount >= 20 ? "💪 استمر، أنت في المنافسة!" :
+             myCount >= 10 ? "⭐ بداية قوية!" :
+             "كل بطل بدأ من أول حجز!"}
+          </p>
+        </section>
+      )}
+
+      <section className="leaderboard">
+        <h2>🥇 لوحة الصدارة</h2>
+        {loading ? <p>جاري تحميل البيانات...</p> :
+          team.map((person, index) => (
+            <div className="player" key={person.id}>
+              <div className="rank">
+                {["🥇", "🥈", "🥉"][index] || "⭐"}
+              </div>
+              <div className="player-info">
+                <strong>{person.name}</strong>
+                <div className="mini-progress">
+                  <div style={{
+                    width: Math.min(person.count / TARGET * 100, 100) + "%"
+                  }} />
+                </div>
+              </div>
+              <strong>{person.count}/50</strong>
+            </div>
+          ))
+        }
+      </section>
+
+      <footer>
+        {message && <p>{message}</p>}
+        <p>✨ كلنا بننافس علشان ننجح</p>
+        <small>HEAVEN TRAVEL SALES TEAM</small>
+      </footer>
+    </main>
+  );
+}
